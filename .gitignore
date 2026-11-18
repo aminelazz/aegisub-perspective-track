@@ -1,0 +1,28 @@
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+.venv/
+venv/
+env/
+
+# Temporary solver / test artifacts
+aegisub_persp_*.json
+*.tmp
+*.log
+*.avi
+*.mp4
+*.mkv
+*.mov
+*.ass.bak
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
