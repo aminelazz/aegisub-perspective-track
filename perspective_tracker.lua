@@ -10,10 +10,15 @@ script_description = "Tracks a 4-corner \\clip planar sign across video frames a
 script_author = "Perspective Tracker"
 script_version = "1.0.0"
 
+local AI_MESH_METHOD = "AI Mesh Import (Google Colab CoTracker3 JSON)"
+local CPU_MESH_METHOD = "CPU Non-Rigid Mesh Optical Flow (Bending / Distort)"
+
 local TRACKING_METHODS = {
     "Hybrid Optical Flow + Feature Homography (Recommended)",
     "Dense Corner Lucas-Kanade Optical Flow",
     "ORB Feature Matching + RANSAC",
+    CPU_MESH_METHOD,
+    AI_MESH_METHOD,
 }
 
 local TRACKING_DIRECTIONS = {
@@ -24,6 +29,12 @@ local TRACKING_DIRECTIONS = {
 local ASPECT_MODES = {
     "Auto-Estimate Plane Aspect Ratio",
     "Keep Original Text Aspect Ratio",
+}
+
+local DISTORTION_MODES = {
+    "Option A: Vector Drawing Mesh Warp (\\p4 Outlines)",
+    "Option B: Per-Character 3D Tags (Native Font)",
+    "Option C: Multi-Plane Fold Split + Dynamic \\clip",
 }
 
 local function is_windows()
@@ -424,11 +435,17 @@ local function default_config()
     return {
         python_executable = is_windows() and "python" or "python3",
         python_script_path = detect_default_solver_path(),
+        mesh_json_path = "",
+        font_file_path = "",
         tracking_method = TRACKING_METHODS[1],
         tracking_direction = TRACKING_DIRECTIONS[1],
         aspect_ratio_mode = ASPECT_MODES[1],
+        distortion_mode = DISTORTION_MODES[1],
+        arabic_text = false,
         fov_factor = 1.0,
         smoothing_window = 0,
+        mesh_cols = 10,
+        mesh_rows = 6,
     }
 end
 
@@ -460,6 +477,12 @@ local function load_config()
     if type(parsed.python_script_path) == "string" and parsed.python_script_path ~= "" then
         cfg.python_script_path = parsed.python_script_path
     end
+    if type(parsed.mesh_json_path) == "string" then
+        cfg.mesh_json_path = parsed.mesh_json_path
+    end
+    if type(parsed.font_file_path) == "string" then
+        cfg.font_file_path = parsed.font_file_path
+    end
     if type(parsed.tracking_method) == "string" and in_list(parsed.tracking_method, TRACKING_METHODS) then
         cfg.tracking_method = parsed.tracking_method
     end
@@ -469,11 +492,27 @@ local function load_config()
     if type(parsed.aspect_ratio_mode) == "string" and in_list(parsed.aspect_ratio_mode, ASPECT_MODES) then
         cfg.aspect_ratio_mode = parsed.aspect_ratio_mode
     end
+    if type(parsed.distortion_mode) == "string" and in_list(parsed.distortion_mode, DISTORTION_MODES) then
+        cfg.distortion_mode = parsed.distortion_mode
+    elseif parsed.opt_per_char == true then
+        cfg.distortion_mode = DISTORTION_MODES[2]
+    elseif parsed.opt_fold_split == true then
+        cfg.distortion_mode = DISTORTION_MODES[3]
+    end
+    if type(parsed.arabic_text) == "boolean" then
+        cfg.arabic_text = parsed.arabic_text
+    end
     if type(parsed.fov_factor) == "number" and parsed.fov_factor > 0.05 then
         cfg.fov_factor = parsed.fov_factor
     end
     if type(parsed.smoothing_window) == "number" then
         cfg.smoothing_window = math.max(0, math.min(10, math.floor(parsed.smoothing_window + 0.5)))
+    end
+    if type(parsed.mesh_cols) == "number" then
+        cfg.mesh_cols = math.max(3, math.min(24, math.floor(parsed.mesh_cols + 0.5)))
+    end
+    if type(parsed.mesh_rows) == "number" then
+        cfg.mesh_rows = math.max(3, math.min(24, math.floor(parsed.mesh_rows + 0.5)))
     end
 
     return cfg
@@ -614,10 +653,10 @@ local function extract_script_info_and_video(subtitles)
     local video_path = (props and props.video_file and props.video_file ~= "") and props.video_file or garbage_video
 
     if not video_path or video_path == "" then
-        return nil, play_res_x, play_res_y, "No active video file is loaded in Aegisub.\n\nPlease open a video file (Video -> Open Video...) before running the tracker."
+        return "", play_res_x, play_res_y, "No active video file is loaded in Aegisub.\n\nPlease open a video file (Video -> Open Video...) before running the tracker."
     end
     if video_path:match("^%?dummy") then
-        return nil, play_res_x, play_res_y, "A dummy video is currently loaded.\n\nPlease open an actual video file before running the planar tracker."
+        return "", play_res_x, play_res_y, "A dummy video is currently loaded.\n\nPlease open an actual video file before running video tracking."
     end
     if video_path:sub(1, 1) == "?" then
         video_path = aegisub.decode_path(video_path)
@@ -633,6 +672,32 @@ local function extract_script_info_and_video(subtitles)
     end
 
     return video_path, play_res_x, play_res_y, nil
+end
+
+local function extract_style_info(subtitles, style_name)
+    for i = 1, #subtitles do
+        local line = subtitles[i]
+        if line.class == "style" and line.name == style_name then
+            return {
+                fontname = line.fontname or "Arial",
+                fontsize = tonumber(line.fontsize) or 48.0,
+                bold = line.bold == true,
+                italic = line.italic == true,
+                spacing = tonumber(line.spacing) or 0.0,
+                scale_x = tonumber(line.scale_x) or 100.0,
+                scale_y = tonumber(line.scale_y) or 100.0,
+            }
+        end
+    end
+    return {
+        fontname = "Arial",
+        fontsize = 48.0,
+        bold = false,
+        italic = false,
+        spacing = 0.0,
+        scale_x = 100.0,
+        scale_y = 100.0,
+    }
 end
 
 -- ---------------------------------------------------------------------------
@@ -734,15 +799,56 @@ local function show_tracker_dialog(cfg)
                 x = 1, y = 4, width = 2, height = 1,
                 hint = "Temporal Gaussian smoothing radius (0 = raw per-frame, up to 10 frames)",
             },
-            {class = "label", label = "Python Solver (.py) Path:", x = 0, y = 5, width = 1, height = 1},
+            {class = "label", label = "CPU Mesh Grid (Cols x Rows):", x = 0, y = 5, width = 1, height = 1},
+            {
+                class = "intedit", name = "mesh_cols",
+                value = cfg.mesh_cols, min = 3, max = 24,
+                x = 1, y = 5, width = 1, height = 1,
+                hint = "Mesh grid columns for CPU Non-Rigid Mesh mode (default 10)",
+            },
+            {
+                class = "intedit", name = "mesh_rows",
+                value = cfg.mesh_rows, min = 3, max = 24,
+                x = 2, y = 5, width = 1, height = 1,
+                hint = "Mesh grid rows for CPU Non-Rigid Mesh mode (default 6)",
+            },
+            {class = "label", label = "Distortion Mode (Mesh / AI):", x = 0, y = 6, width = 1, height = 1},
+            {
+                class = "dropdown", name = "distortion_mode",
+                items = DISTORTION_MODES, value = cfg.distortion_mode,
+                x = 1, y = 6, width = 2, height = 1,
+                hint = "Single-choice output mode for CPU Non-Rigid Mesh and AI Mesh Import",
+            },
+            {
+                class = "checkbox", name = "arabic_text",
+                label = "Arabic Text (Join Letters & Invert RTL Visual Order)",
+                value = cfg.arabic_text,
+                x = 0, y = 7, width = 3, height = 1,
+                hint = "Shapes Arabic text with OpenType / Presentation Forms-B and reverses RTL order for mesh warping",
+            },
+            {class = "label", label = "Font File (.ttf/.otf/.ttc):", x = 0, y = 8, width = 1, height = 1},
+            {
+                class = "edit", name = "font_file_path",
+                text = cfg.font_file_path,
+                x = 1, y = 8, width = 2, height = 1,
+                hint = "Font file for Option A/B vector outlines (supports fonts loaded via NexusFont)",
+            },
+            {class = "label", label = "AI Mesh JSON (Colab):", x = 0, y = 9, width = 1, height = 1},
+            {
+                class = "edit", name = "mesh_json_path",
+                text = cfg.mesh_json_path,
+                x = 1, y = 9, width = 2, height = 1,
+                hint = "Path to mesh_track.json exported from the Google Colab CoTracker3 notebook",
+            },
+            {class = "label", label = "Python Solver (.py) Path:", x = 0, y = 10, width = 1, height = 1},
             {
                 class = "edit", name = "python_script_path",
-                value = cfg.python_script_path,
-                x = 1, y = 5, width = 2, height = 1,
+                text = cfg.python_script_path,
+                x = 1, y = 10, width = 2, height = 1,
             },
         }
 
-        local buttons = {"Track & Solve", "Choose .py Script...", "Cancel"}
+        local buttons = {"Track & Solve", "Choose Font...", "Choose Mesh JSON...", "Choose .py Script...", "Cancel"}
         local btn, res = aegisub.dialog.display(
             dialog_config,
             buttons,
@@ -757,13 +863,52 @@ local function show_tracker_dialog(cfg)
         cfg.tracking_method = res.tracking_method
         cfg.tracking_direction = res.tracking_direction
         cfg.aspect_ratio_mode = res.aspect_ratio_mode
+        cfg.distortion_mode = res.distortion_mode
+        cfg.arabic_text = res.arabic_text == true
         cfg.fov_factor = tonumber(res.fov_factor) or 1.0
         cfg.smoothing_window = math.max(0, math.min(10, math.floor((tonumber(res.smoothing_window) or 0) + 0.5)))
+        cfg.mesh_cols = math.max(3, math.min(24, math.floor((tonumber(res.mesh_cols) or 10) + 0.5)))
+        cfg.mesh_rows = math.max(3, math.min(24, math.floor((tonumber(res.mesh_rows) or 6) + 0.5)))
+        if type(res.font_file_path) == "string" then
+            cfg.font_file_path = res.font_file_path
+        end
+        if type(res.mesh_json_path) == "string" then
+            cfg.mesh_json_path = res.mesh_json_path
+        end
         if res.python_script_path and res.python_script_path ~= "" then
             cfg.python_script_path = res.python_script_path
         end
 
-        if btn == "Choose .py Script..." then
+        if btn == "Choose Font..." then
+            local start_dir = cfg.font_file_path ~= "" and cfg.font_file_path or aegisub.decode_path("?script/")
+            local chosen = aegisub.dialog.open(
+                "Select Font File (.ttf / .otf / .ttc)",
+                start_dir,
+                "",
+                "Font files (*.ttf;*.otf;*.ttc;*.otc)|*.ttf;*.otf;*.ttc;*.otc|All files (*.*)|*.*",
+                false,
+                true
+            )
+            if chosen and chosen ~= "" then
+                cfg.font_file_path = chosen
+                save_config(cfg)
+            end
+        elseif btn == "Choose Mesh JSON..." then
+            local start_dir = cfg.mesh_json_path ~= "" and cfg.mesh_json_path or aegisub.decode_path("?script/")
+            local chosen = aegisub.dialog.open(
+                "Select Exported Colab Mesh JSON",
+                start_dir,
+                "",
+                "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                false,
+                true
+            )
+            if chosen and chosen ~= "" then
+                cfg.mesh_json_path = chosen
+                cfg.tracking_method = AI_MESH_METHOD
+                save_config(cfg)
+            end
+        elseif btn == "Choose .py Script..." then
             local chosen = aegisub.dialog.open(
                 "Select perspective_solver.py",
                 cfg.python_script_path,
@@ -806,19 +951,7 @@ local function run_perspective_tracker(subtitles, selected_lines)
         return
     end
 
-    local clip_corners, clip_err = validate_and_extract_clip(guide_line.text)
-    if not clip_corners then
-        show_error(clip_err)
-        aegisub.cancel()
-        return
-    end
-
     local video_path, play_res_x, play_res_y, vid_err = extract_script_info_and_video(subtitles)
-    if not video_path then
-        show_error(vid_err)
-        aegisub.cancel()
-        return
-    end
 
     local cfg = load_config()
     cfg = show_tracker_dialog(cfg)
@@ -837,6 +970,48 @@ local function run_perspective_tracker(subtitles, selected_lines)
         return
     end
 
+    local is_ai_mesh = cfg.tracking_method == AI_MESH_METHOD
+    local is_cpu_mesh = cfg.tracking_method == CPU_MESH_METHOD
+    local needs_font_file = (is_ai_mesh or is_cpu_mesh) and (cfg.distortion_mode ~= DISTORTION_MODES[3])
+
+    if needs_font_file and (cfg.font_file_path == "" or not file_exists(cfg.font_file_path)) then
+        show_error(
+            "Font file not selected or not found:\n"
+            .. tostring(cfg.font_file_path)
+            .. "\n\nPlease click 'Choose Font...' to pick the .ttf / .otf / .ttc font file used for your sign."
+        )
+        aegisub.cancel()
+        return
+    end
+
+    local clip_corners = nil
+    if is_ai_mesh then
+        if cfg.mesh_json_path == "" or not file_exists(cfg.mesh_json_path) then
+            show_error(
+                "AI Mesh JSON file not found:\n"
+                .. tostring(cfg.mesh_json_path)
+                .. "\n\nPlease click 'Choose Mesh JSON...' to select the mesh_track.json exported from Colab."
+            )
+            aegisub.cancel()
+            return
+        end
+        local optional_clip = validate_and_extract_clip(guide_line.text)
+        clip_corners = optional_clip
+    else
+        if vid_err then
+            show_error(vid_err)
+            aegisub.cancel()
+            return
+        end
+        local clip_err
+        clip_corners, clip_err = validate_and_extract_clip(guide_line.text)
+        if not clip_corners then
+            show_error(clip_err)
+            aegisub.cancel()
+            return
+        end
+    end
+
     -- Save configuration when applying script.
     save_config(cfg)
 
@@ -845,7 +1020,7 @@ local function run_perspective_tracker(subtitles, selected_lines)
     local end_frame = math.max(start_frame, end_frame_excl - 1)
 
     aegisub.progress.title(script_name)
-    aegisub.progress.task(string.format("Tracking frames %d to %d...", start_frame, end_frame))
+    aegisub.progress.task(string.format("Solving frames %d to %d...", start_frame, end_frame))
     aegisub.progress.set(15)
 
     local request_payload = {
@@ -856,11 +1031,18 @@ local function run_perspective_tracker(subtitles, selected_lines)
         play_res_y = play_res_y,
         clip_corners = clip_corners,
         text = guide_line.text,
+        style = extract_style_info(subtitles, guide_line.style),
         tracking_method = cfg.tracking_method,
         tracking_direction = cfg.tracking_direction,
         aspect_ratio_mode = cfg.aspect_ratio_mode,
+        distortion_mode = cfg.distortion_mode,
+        arabic_text = cfg.arabic_text,
+        font_file_path = cfg.font_file_path,
         fov_factor = cfg.fov_factor,
         smoothing_window = cfg.smoothing_window,
+        mesh_json_path = cfg.mesh_json_path,
+        mesh_cols = cfg.mesh_cols,
+        mesh_rows = cfg.mesh_rows,
     }
 
     local result, solver_err = invoke_python_solver(
@@ -894,6 +1076,9 @@ local function run_perspective_tracker(subtitles, selected_lines)
         new_line.start_time = aegisub.ms_from_frame(f_num)
         new_line.end_time = aegisub.ms_from_frame(f_num + 1)
         new_line.text = frame_data.text
+        if type(frame_data.effect) == "string" and frame_data.effect ~= "" then
+            new_line.effect = frame_data.effect
+        end
         subtitles.insert(insert_pos, new_line)
         new_selection[#new_selection + 1] = insert_pos
         insert_pos = insert_pos + 1

@@ -1,16 +1,19 @@
-# Aegisub 3D Perspective Planar Tracker
+# Aegisub 3D Perspective & Non-Rigid Mesh Tracker
 
-An Aegisub Automation 4 Lua macro (`perspective_tracker.lua`) paired with a CPU-optimized Python planar tracker and exact libass 3D perspective solver (`perspective_solver.py`).
+An Aegisub Automation 4 Lua macro (`perspective_tracker.lua`) paired with a CPU-optimized Python planar & non-rigid mesh solver (`perspective_solver.py`) and an optional Google Colab AI notebook (`colab_ai_mesh_tracker.ipynb`).
 
-It tracks a 4-corner planar sign across video frames using OpenCV (Pyramidal Lucas-Kanade Optical Flow, ORB + RANSAC Homography, or Hybrid) and converts the 2D quadrilateral warp into exact frame-by-frame ASS 3D transform tags (`\an5\pos(...)\org(...)\fscx...\fscy...\frx...\fry...\frz...`).
+It supports:
+1. **Planar 3D Perspective Tracking (CPU)** — Tracks a 4-corner planar sign via OpenCV (Lucas-Kanade Optical Flow, ORB + RANSAC Homography, or Hybrid) into exact frame-by-frame ASS 3D tags (`\an5\pos\org\fscx\fscy\frx\fry\frz`).
+2. **Non-Rigid Bending / Distortion / Folding Tracking (CPU Mesh or Google Colab CoTracker3 AI)** — Tracks a dense 2D grid across curved, waving, bending, or folding surfaces and reproduces the motion via **one selectable ASS distortion mode** (Option A, B, or C), with direct `.ttf`/`.otf`/`.ttc` font selection (compatible with NexusFont) and **Arabic Text** shaping/RTL support.
 
 ---
 
 ## Files
 
-- `perspective_tracker.lua` — Aegisub Automation 4 macro with GUI, `\clip` validation, JSON config persistence, and frame-by-frame subtitle insertion.
-- `perspective_solver.py` — CPU-optimized OpenCV planar tracker and exact homography-to-libass 3D perspective solver (also usable standalone via CLI).
-- `requirements.txt` — Python dependencies (`opencv-python`, `numpy`).
+- `perspective_tracker.lua` — Aegisub Automation 4 macro with GUI, `\clip` validation, JSON config persistence, and frame-by-frame insertion.
+- `perspective_solver.py` — CPU planar & non-rigid mesh tracker, AI mesh JSON importer, HarfBuzz/FreeType glyph outline warper + Arabic Presentation Forms-B reshaper, and 3D ASS solver (also usable standalone via CLI).
+- `colab_ai_mesh_tracker.ipynb` — Google Colab notebook running Meta AI's **CoTracker3** (`cotracker3_offline`) on a free T4 GPU for complex deforming/occluded signs, exporting `mesh_track.json`.
+- `requirements.txt` — Python dependencies (`opencv-python`, `numpy`, `freetype-py`, `fonttools`, `uharfbuzz`).
 
 ---
 
@@ -30,36 +33,46 @@ pip install -r requirements.txt
    - **macOS**: `~/Library/Application Support/Aegisub/automation/autoload/`
 2. Place `perspective_solver.py` either:
    - In the same `automation/autoload/` directory next to `perspective_tracker.lua` (auto-detected automatically), **or**
-   - In any directory of your choice and select it directly from the GUI using the **`Choose .py Script...`** button.
+   - In any folder and pick it via the **`Choose .py Script...`** button inside the GUI.
 3. In Aegisub, click **Automation → Reload Autoload Scripts** (or restart Aegisub). The macro appears under **Automation → 3D Perspective Planar Tracker**.
 
 ### 3. Configuration File Location
-Settings (including the selected `perspective_solver.py` path and last-used tracking parameters) are automatically loaded on launch and saved whenever you click **Track & Solve** or **Choose .py Script...**:
+Settings (solver path, Colab mesh JSON path, selected font file path, Arabic Text toggle, and tracking options) are loaded on launch and saved automatically when you click **Track & Solve**, **Choose Font...**, **Choose Mesh JSON...**, or **Choose .py Script...**:
 - **Windows**: `%APPDATA%\aegisub\config\perspective_tracker.json`
 - **Linux**: `$XDG_CONFIG_HOME/aegisub/config/perspective_tracker.json` (defaults to `~/.config/aegisub/config/perspective_tracker.json`)
 
-> **Tip:** If your Python binary is not on `PATH` or has a custom name (e.g. `py -3` or a virtualenv path), you can edit `"python_executable"` inside `perspective_tracker.json`.
+---
+
+## Workflows
+
+### A. CPU Planar or CPU Non-Rigid Mesh Workflow
+1. Open your video in Aegisub (`Video → Open Video...`).
+2. Create a guide line spanning the sign's start frame to end frame and style your text (`\fn`, `\fs`, `\1c`, `\3c`, `\bord`, `\shad`, `\blur`, `\alpha`, etc.).
+3. Seek to the reference frame (**first frame** for Forward tracking, **last frame** for Backward tracking).
+4. Draw a 4-corner vector `\clip(m x1 y1 l x2 y2 x3 y3 x4 y4)` in clockwise order (`TL → TR → BR → BL`).
+5. Select the guide line, open **Automation → 3D Perspective Planar Tracker**, choose a tracking method:
+   - **Planar 3D methods**: `Hybrid Optical Flow + Feature Homography (Recommended)`, `Dense Corner Lucas-Kanade Optical Flow`, or `ORB Feature Matching + RANSAC`.
+   - **CPU Non-Rigid Mesh**: `CPU Non-Rigid Mesh Optical Flow (Bending / Distort)` — adjust `CPU Mesh Grid (Cols x Rows)` (default `10 x 6`), select your single **Distortion Mode** (Option A, B, or C), click **`Choose Font...`** (required for Option A & B; works with uninstalled NexusFont fonts), and check **`Arabic Text`** if translating into Arabic.
+6. Click **Track & Solve**.
+
+### B. Complex Distortion / Occlusion AI Workflow (Google Colab CoTracker3)
+For blank/low-texture paper, heavy curling/crumpling, waving cloth, or temporary occlusions (e.g., a hand turning a page):
+1. Upload `colab_ai_mesh_tracker.ipynb` to [Google Colab](https://colab.research.google.com/) and switch runtime to **T4 GPU** (**Runtime → Change runtime type → T4 GPU**).
+2. Upload your trimmed video clip (or mount Google Drive), paste your `\clip(...)` coordinates from Aegisub, set `PLAY_RES_X` / `PLAY_RES_Y` / frame range, and run all cells.
+3. Download the generated `mesh_track.json`.
+4. Back in Aegisub, select your styled guide line (covering the matching frame count or exact frame numbers), run **3D Perspective Planar Tracker**, click **`Choose Mesh JSON...`** to load `mesh_track.json` (this also selects `AI Mesh Import (Google Colab CoTracker3 JSON)` automatically), select your **Distortion Mode** + font file (and **`Arabic Text`** if needed), and click **Track & Solve**.
 
 ---
 
-## Guide Line Workflow in Aegisub
+## Distortion Output Modes (CPU Mesh & AI Mesh)
 
-1. **Open your video** in Aegisub (`Video → Open Video...`).
-2. **Create a guide line** spanning the start frame to end frame of the sign appearance.
-3. **Style your sign text** on the guide line as desired (`\fn`, `\fs`, `\1c`, `\3c`, `\bord`, `\shad`, `\blur`, `\alpha`, etc.).
-4. **Seek to the reference frame**:
-   - **Forward tracking**: seek to the **first frame** of the guide line.
-   - **Backward tracking**: seek to the **last frame** of the guide line.
-5. **Draw the 4-corner `\clip`**:
-   - Select Aegisub's **Vector Clip** tool (`\clip(m x1 y1 l x2 y2 x3 y3 x4 y4)`).
-   - Click the **4 corners of the planar sign in clockwise order**:
-     1. **Top-Left (TL)**
-     2. **Top-Right (TR)**
-     3. **Bottom-Right (BR)**
-     4. **Bottom-Left (BL)**
-6. Select the guide line and run **Automation → 3D Perspective Planar Tracker**.
-7. Configure the dialog options and click **Track & Solve**.
-8. The macro inserts exact single-frame dialogue lines directly above your guide line and comments out the original guide line.
+Choose **one** output mode from the **Distortion Mode (Mesh / AI)** dropdown:
+
+| Mode | Output `Effect` Tag | How It Works | Best For |
+|---|---|---|---|
+| **Option A: Vector Drawing Mesh Warp (`\p4` Outlines)** *(Default)* | `mesh_vector_p4` | Loads your chosen `.ttf`/`.otf`/`.ttc` directly (no system installation required), shapes text via HarfBuzz (`uharfbuzz`) + FreeType, subdivides curves, and warps every vertex through the tracked mesh into ASS `\p4` (`0.125 px` sub-pixel) drawings preserving colors, borders, shadows, blur, and alpha. | True arbitrary bending, cursive Arabic signs, uninstalled/NexusFont fonts, wavy flags, and mid-letter folds. |
+| **Option B: Per-Character 3D Tags (Native Font)** | `mesh_per_char` | Splits text into individual characters aligned on the typographic baseline and solves local per-character `\pos\org\fscx\fscy\frx\fry\frz` tags from surrounding mesh cells. When **Arabic Text** is checked, automatically converts logical Arabic into Presentation Forms-B in visual RTL order (e.g., `"صباح الخير"` → `"ﺮﻴﺨﻟﺍ ﺡﺎﺒﺻ"`). | Gently curving text or waving banners with lightweight native font rendering. |
+| **Option C: Multi-Plane Fold Split + Dynamic `\clip`** | `mesh_fold_p1`, `mesh_fold_p2` | Automatically detects the optimal vertical or horizontal fold crease across the mesh, fits two independent 3D panel homographies, and generates two native-font layers dynamically clipped along the tracked crease line. Keeps logical Arabic intact for libass native rendering. | Crisp 2-panel paper folds, greeting cards, and book page turns. |
 
 ---
 
@@ -67,30 +80,24 @@ Settings (including the selected `perspective_solver.py` path and last-used trac
 
 | Parameter | Options / Range | Description |
 |---|---|---|
-| **Tracking Method** | `Hybrid Optical Flow + Feature Homography (Recommended)`<br>`Dense Corner Lucas-Kanade Optical Flow`<br>`ORB Feature Matching + RANSAC` | **Hybrid** combines forward-backward filtered dense grid + Shi-Tomasi pyramidal Lucas-Kanade flow with CLAHE-enhanced ORB descriptor matches into a unified RANSAC + least-squares refined homography.<br>**Dense LK** uses dense perspective grid + corner neighborhoods + Shi-Tomasi points with forward-backward consistency checking.<br>**ORB + RANSAC** uses mutual kNN Hamming matches inside the quad ROI (with automatic LK augmentation on low-texture regions). |
-| **Tracking Direction** | `Forward (Start Frame -> End Frame)`<br>`Backward (End Frame -> Start Frame)` | Choose whether your initial `\clip` was drawn on the line's first frame (track forward) or last frame (track backward). Backward mode decodes sequential chunks to avoid inaccurate keyframe seeking. |
-| **Aspect Ratio Mode** | `Auto-Estimate Plane Aspect Ratio`<br>`Keep Original Text Aspect Ratio` | **Auto-Estimate** recovers the true un-foreshortened 3D plane aspect ratio using your Virtual Focal Length (`fov_factor`), adjusting `\fscx`/`\fscy` so the text sits naturally on tilted surfaces.<br>**Keep Original** keeps `100% : 100%` aspect ratio on the reference frame while tracking scale and perspective deformation across the shot. |
-| **Virtual Focal Length (FOV factor)** | Float, default `1.0` | Focal length relative to `PlayResX` (`1.0` ≈ standard 50mm lens). Used to recover true 3D foreshortening proportions on tilted planes when converting to libass perspective. |
-| **Smoothing Window (Frames)** | Integer `0`–`10`, default `0` | Applies a symmetric Gaussian-weighted moving average across the tracked corner trajectories (while pinning the initial reference frame) to damp sub-pixel micro-jitter. |
-| **Python Solver (.py) Path** | File path + `Choose .py Script...` | Path to `perspective_solver.py`. Clicking **Choose .py Script...** opens a file picker and saves the path to `perspective_tracker.json`. |
-
----
-
-## How the 3D Decomposition Works
-
-1. **Planar Homography Tracking (Step A)**:
-   On each frame step, dense interior/edge grid samples, corner neighborhoods, Shi-Tomasi keypoints, and/or ORB features inside the quadrilateral are matched to the next frame and filtered via forward-backward consistency + RANSAC homography estimation (`cv2.findHomography`), projecting the 4 corners cleanly even under partial occlusion or motion blur.
-2. **Exact libass Projection Math (Step B)**:
-   - libass projects text around `\org(ox, oy)` using a fixed focal plane distance `z = 312.5` and rotation order `\frz → \frx → \fry`.
-   - For each frame's 4 corners `(TL, TR, BR, BL)`, the solver solves a singularity-free rationalized quadratic equation for the optimal `\org(ox, oy)` closest to the quad center where the reconstructed 3D basis vectors are orthogonal (eliminating 3D skew without requiring `\fax`).
-   - It extracts exact `\frx`, `\fry`, `\frz`, `\pos(px, py)`, and `\fscx`/`\fscy` values that reproject back onto the 4 tracked 2D corners with sub-pixel precision, while unwrapping Euler angles continuously across the `±180°` boundary.
-   - Old positioning/transform/clip tags (`\pos`, `\org`, `\fr*`, `\fsc*`, `\fa*`, `\an*`, `\clip`, `\iclip`) are stripped cleanly while preserving all user styling tags (`\fn`, `\fs`, `\1c`, `\3c`, `\bord`, `\shad`, `\blur`, `\alpha`, etc.).
+| **Tracking Method** | Planar (`Hybrid` / `LK` / `ORB`), `CPU Non-Rigid Mesh Optical Flow`, `AI Mesh Import` | Choose single-plane homography, CPU non-rigid mesh flow, or imported Colab CoTracker3 mesh JSON. |
+| **Tracking Direction** | `Forward` / `Backward` | Tracks forward from the start frame or backward from the end frame. |
+| **Aspect Ratio Mode** | `Auto-Estimate Plane Aspect Ratio` / `Keep Original Text Aspect Ratio` | Adjusts `\fscx`/`\fscy` proportions for 3D foreshortening using `fov_factor`, or keeps 1:1 text scale on the reference frame. |
+| **Virtual Focal Length (FOV factor)** | Float, default `1.0` | Focal length relative to `PlayResX` (`1.0` ≈ standard 50mm lens). |
+| **Smoothing Window (Frames)** | Integer `0`–`10`, default `0` | Symmetric shrinking-radius Gaussian smoothing to reduce micro-jitter without endpoint lag. |
+| **CPU Mesh Grid (Cols x Rows)** | Integers `3`–`24` (default `10 x 6`) | Grid density for CPU Non-Rigid Mesh tracking. |
+| **Distortion Mode (Mesh / AI)** | Dropdown (Option A / Option B / Option C) | Single-choice distortion output mode for CPU Non-Rigid Mesh & AI Mesh Import. |
+| **Arabic Text** | Checkbox (default unchecked) | Automatically joins Arabic characters (HarfBuzz for Option A; Presentation Forms-B + visual RTL order for Option B) with a double-inversion guard if already converted. |
+| **Font File (.ttf/.otf/.ttc)** | File path + `Choose Font...` | Direct font file path used by Option A and Option B (supports uninstalled / NexusFont fonts). |
+| **AI Mesh JSON (Colab)** | File path + `Choose Mesh JSON...` | Path to `mesh_track.json` exported from `colab_ai_mesh_tracker.ipynb`. |
+| **Python Solver (.py) Path** | File path + `Choose .py Script...` | Path to `perspective_solver.py`. |
 
 ---
 
 ## Troubleshooting & Edge Cases
 
-- **Rectangular `\clip(x1,y1,x2,y2)`**: Not supported because it only defines 2 corners. Switch to Aegisub's **Vector Clip** tool and mark all 4 corners (`m x1 y1 l x2 y2 x3 y3 x4 y4`).
-- **Non-4-point `\clip` or self-intersecting quad**: The script verifies that exactly 4 distinct convex corners exist. Mark corners in perimeter order (`TL → TR → BR → BL`). Counter-clockwise clicks are automatically normalized to clockwise.
-- **Dummy video loaded**: Tracking requires real video frames. Open an actual video via `Video → Open Video...`.
-- **Missing Python or OpenCV**: Ensure `python` (or `python3`) works in your terminal and `pip install -r requirements.txt` succeeded.
+- **Font mismatch with NexusFont / uninstalled fonts**: Always use **`Choose Font...`** to pick the `.ttf` / `.otf` / `.ttc` file directly. Option A (`\p4` Vector Warp) renders the exact outlines from that file even if the font isn't permanently installed in Windows/macOS/Linux.
+- **Arabic letters separated or reversed**: Check **`Arabic Text`**. Note that if your text was already converted with an online Presentation Forms-B tool, the solver automatically detects it and avoids double-inverting it.
+- **Rectangular `\clip(x1,y1,x2,y2)`**: Not supported for tracking because it only specifies 2 corners. Use Aegisub's **Vector Clip** tool (`m x1 y1 l x2 y2 x3 y3 x4 y4`).
+- **Frame count mismatch with AI Mesh JSON**: Either match the guide line's exact frame numbers or ensure the guide line spans the exact same number of frames as the trimmed Colab export (`len(frames)`).
+- **Missing `freetype-py` or `uharfbuzz`**: Install all dependencies via `pip install -r requirements.txt`.
